@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+
+.env
+.env.*
+.aws/
+
+agentcore/.cli/
+agentcore/.cache/
+agentcore/.tmp/
+*.log
+
+.vscode/
+.idea/
+
+.DS_Store
