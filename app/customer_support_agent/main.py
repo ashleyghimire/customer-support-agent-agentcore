@@ -333,11 +333,7 @@ class MemoryHook(HookProvider):
                 parts = []
 
                 for item in content:
-                    if (
-                        isinstance(item, dict)
-                        and item.get("text")
-                        and item.get("type") == "text"
-                    ):
+                    if isinstance(item, dict) and item.get("text"):
                         parts.append(item["text"])
 
                 if parts:
@@ -366,9 +362,17 @@ class MemoryHook(HookProvider):
                 ],
             )
 
+            logging.warning(
+                "MEMORY SAVE SUCCESS: actor_id=%r session_id=%r",
+                self.actor_id,
+                self.session_id,
+            )
+
         except Exception as e:
-            logger.warning(
-                "Could not save support interaction to memory: %s",
+            logging.warning(
+                "MEMORY SAVE ERROR: actor_id=%r session_id=%r error=%r",
+                self.actor_id,
+                self.session_id,
                 e,
             )
 
