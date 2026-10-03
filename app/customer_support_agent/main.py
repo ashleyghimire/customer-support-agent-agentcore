@@ -166,6 +166,7 @@ class MemoryHook(HookProvider):
         self.memory_id = memory_id
         self.namespaces = get_namespaces(memory_client, memory_id)
         self._context_added = False
+        self.latest_user_query = None
 
     def retrieve_customer_context(self, event: MessageAddedEvent):
         """Retrieve relevant long-term memories and add them to the user message."""
@@ -203,12 +204,38 @@ class MemoryHook(HookProvider):
         if not user_message:
             return
 
+        # The AgentCore runtime may pass the full JSON payload as the
+        # user message. Extract only the actual customer prompt.
+        try:
+            payload = json.loads(user_message)
+
+            if isinstance(payload, dict) and payload.get("prompt"):
+                user_message = payload["prompt"]
+
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Preserve the original customer query before adding retrieved context.
+        self.latest_user_query = user_message
+
+        logging.warning(
+            "MEMORY DEBUG ACTOR: actor_id=%r namespaces=%r",
+            self.actor_id,
+            self.namespaces,
+        )
+
         memory_context = []
 
         for strategy_type, namespace_template in self.namespaces.items():
             namespace = namespace_template.replace(
                 "{actorId}",
                 self.actor_id,
+            )
+
+            logging.warning(
+                "MEMORY DEBUG NAMESPACE: strategy=%r namespace=%r",
+                strategy_type,
+                namespace,
             )
 
             try:
@@ -271,31 +298,56 @@ class MemoryHook(HookProvider):
         """Save the latest customer question and assistant response."""
         messages = event.agent.messages
 
-        customer_query = None
+        logging.warning(
+            "MEMORY DEBUG: latest_user_query=%r message_count=%d",
+            self.latest_user_query,
+            len(messages),
+        )
+
+        for index, message in enumerate(messages):
+            logging.warning(
+                "MEMORY DEBUG MESSAGE %d: role=%r content=%r",
+                index,
+                message.get("role"),
+                message.get("content"),
+            )
+
+        customer_query = self.latest_user_query
         assistant_response = None
 
-        # Walk backwards so we get the most recent interaction.
         for message in reversed(messages):
             role = message.get("role")
-            content = message.get("content", "")
 
-            if isinstance(content, list):
-                text_parts = []
+            # Skip tool messages completely
+            if role in ("tool", "system"):
+                continue
+
+            content = message.get("content")
+
+            text = None
+
+            if isinstance(content, str):
+                text = content
+
+            elif isinstance(content, list):
+                parts = []
 
                 for item in content:
-                    if isinstance(item, dict) and "text" in item:
-                        text_parts.append(item["text"])
+                    if (
+                        isinstance(item, dict)
+                        and item.get("text")
+                        and item.get("type") == "text"
+                    ):
+                        parts.append(item["text"])
 
-                content = "\n".join(text_parts)
+                if parts:
+                    text = "\n".join(parts)
 
-            if not isinstance(content, str):
+            if not text:
                 continue
 
             if role == "assistant" and assistant_response is None:
-                assistant_response = content
-
-            elif role == "user" and customer_query is None:
-                customer_query = content
+                assistant_response = text
 
             if customer_query and assistant_response:
                 break
@@ -315,7 +367,7 @@ class MemoryHook(HookProvider):
             )
 
         except Exception as e:
-            logging.warning(
+            logger.warning(
                 "Could not save support interaction to memory: %s",
                 e,
             )
@@ -456,7 +508,11 @@ tier_rates = {{
 # Points can only be redeemed in blocks of 500.
 # Redemption is capped at 50% of the order total.
 max_points_value = order_total * 0.50
-max_redeemable_points = math.floor(max_points_value / 0.01)
+
+max_redeemable_points = (
+    math.floor((max_points_value / 0.01) / 500) * 500
+)
+
 points_redeemed = min(
     loyalty_points // 500 * 500,
     max_redeemable_points,
@@ -498,6 +554,7 @@ print(json.dumps(result))
                 {
                     "language": "python",
                     "code": code,
+                    "clearContext": True,
                 },
             )
 
@@ -602,20 +659,49 @@ async def invoke(payload, context=None):
       customer_id (str, optional) — unique customer identifier
       session_id  (str, optional) — session identifier; generated if absent
     """
+    # AgentCore CLI sends the complete JSON request inside the "prompt" field.
+    # Normalize that nested payload before extracting customer/session information.
+    if isinstance(payload, dict) and isinstance(payload.get("prompt"), str):
+        try:
+            nested_payload = json.loads(payload["prompt"])
+            if isinstance(nested_payload, dict):
+                payload = nested_payload
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     prompt = payload.get("prompt", "")
-    customer_id = payload.get("customer_id", "anonymous")
-    session_id = payload.get("session_id") or str(uuid.uuid4())
+    actor_id = payload.get("user_id", "anonymous")
+
+    session_id = (
+        context.session_id
+        if context and getattr(context, "session_id", None)
+        else str(uuid.uuid4())
+    )
+
+    logging.warning(
+        "INVOKE DEBUG: payload=%r prompt=%r actor_id=%r session_id=%r",
+        payload,
+        prompt,
+        actor_id,
+        session_id,
+    )
 
     if not prompt:
         return "Please provide a customer support question or request."
 
     memory_hook = MemoryHook(
-        actor_id=customer_id,
+        actor_id=actor_id,
         session_id=session_id,
         memory_client=memory_client,
         memory_id=MEMORY_ID,
     )
 
+    logging.warning(
+        "INVOKE DEBUG FINAL: actor_id=%r session_id=%r",
+        actor_id,
+        session_id,
+    )
+    
     browser = AgentCoreBrowser(region=REGION)
 
     mcp = MCPClient(url=GATEWAY_URL)
